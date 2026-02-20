@@ -18,6 +18,105 @@ logger = logging.getLogger(__name__)
 rate_limiters = {}
 
 
+def acortar_url_tinyurl(url_larga: str) -> str:
+    """
+    Acorta una URL usando TinyURL (gratis, sin API key requerida)
+
+    Args:
+        url_larga: URL original a acortar
+
+    Returns:
+        URL acortada o URL original si falla
+    """
+    try:
+        if not url_larga or len(url_larga) < 10:
+            return url_larga
+
+        # TinyURL API - gratis y sin autenticación
+        response = requests.get(
+            f'http://tinyurl.com/api-create.php?url={url_larga}',
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            url_corta = response.text.strip()
+            if url_corta.startswith('https://'):
+                logger.info(f"✓ URL acortada: {url_larga[:50]}... → {url_corta}")
+                return url_corta
+
+        logger.warning(f"TinyURL no respondió correctamente para: {url_larga[:50]}")
+        return url_larga
+
+    except requests.Timeout:
+        logger.warning(f"Timeout acortando URL: {url_larga[:50]}")
+        return url_larga
+    except Exception as e:
+        logger.warning(f"Error acortando URL con TinyURL: {e}")
+        return url_larga
+
+
+def acortar_url_bitly(url_larga: str, api_token: Optional[str] = None) -> str:
+    """
+    Acorta una URL usando Bitly (requiere API token)
+
+    Args:
+        url_larga: URL original a acortar
+        api_token: Token de Bitly (si no se proporciona, intenta obtener de variables)
+
+    Returns:
+        URL acortada o URL original si falla
+    """
+    try:
+        import os
+        token = api_token or os.environ.get('BITLY_TOKEN')
+
+        if not token:
+            logger.debug("BITLY_TOKEN no configurado, usando TinyURL como fallback")
+            return acortar_url_tinyurl(url_larga)
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        data = {"long_url": url_larga}
+
+        response = requests.post(
+            'https://api-ssl.bitly.com/v4/shorten',
+            headers=headers,
+            json=data,
+            timeout=5
+        )
+
+        if response.status_code == 200 or response.status_code == 201:
+            url_corta = response.json()['link']
+            logger.info(f"✓ URL acortada (Bitly): {url_larga[:50]}... → {url_corta}")
+            return url_corta
+        else:
+            logger.warning(f"Bitly error {response.status_code}, usando TinyURL")
+            return acortar_url_tinyurl(url_larga)
+
+    except Exception as e:
+        logger.warning(f"Error con Bitly: {e}, usando TinyURL")
+        return acortar_url_tinyurl(url_larga)
+
+
+def acortar_url(url_larga: str) -> str:
+    """
+    Acorta URL intentando primero Bitly, luego TinyURL
+
+    Esta es la función principal que deberías usar
+    """
+    # Intentar primero con Bitly si está configurado
+    import os
+    if os.environ.get('BITLY_TOKEN'):
+        url_corta = acortar_url_bitly(url_larga)
+        if url_corta != url_larga:  # Si se acortó exitosamente
+            return url_corta
+
+    # Fallback a TinyURL
+    return acortar_url_tinyurl(url_larga)
+
+
 class SMSSender:
     """Gestor de envío de SMS con reintentos y validación"""
 
@@ -26,7 +125,13 @@ class SMSSender:
 
     @staticmethod
     def preparar_mensaje(mensaje: str, numero: str, row_data: Optional[Dict] = None, link_dinamico: Optional[str] = None) -> str:
-        """Prepara el mensaje reemplazando variables"""
+        """
+        Prepara el mensaje reemplazando variables y acortando URLs
+
+        Variables soportadas:
+        - {columna_csv}: Reemplazado con valor del CSV
+        - {link}: Reemplazado con URL acortada
+        """
         mensaje_final = mensaje
 
         # Reemplazar variables de datos
@@ -36,9 +141,13 @@ class SMSSender:
                 if placeholder in mensaje_final:
                     mensaje_final = mensaje_final.replace(placeholder, str(valor))
 
-        # Reemplazar link dinámico
+        # Reemplazar link dinámico CON ACORTAMIENTO ✨ NUEVO
         if link_dinamico and '{link}' in mensaje_final:
-            mensaje_final = mensaje_final.replace('{link}', link_dinamico)
+            logger.debug(f"Acortando URL para {numero}: {link_dinamico[:50]}...")
+            # Acortar la URL antes de insertar
+            link_acortado = acortar_url(link_dinamico)
+            mensaje_final = mensaje_final.replace('{link}', link_acortado)
+            logger.info(f"URL acortada en mensaje para {numero}")
 
         return mensaje_final
 
